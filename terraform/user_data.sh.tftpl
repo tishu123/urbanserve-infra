@@ -1,0 +1,151 @@
+#!/bin/bash
+# Bootstraps the UrbanServe API on Amazon Linux 2023 (rendered by Terraform templatefile).
+# Log: /var/log/urbanserve-bootstrap.log
+set -euo pipefail
+exec > >(tee -a /var/log/urbanserve-bootstrap.log) 2>&1
+
+dnf install -y java-21-amazon-corretto-headless
+dnf upgrade -y --security || true
+
+useradd --system --home /opt/urbanserve --shell /sbin/nologin urbanserve || true
+mkdir -p /opt/urbanserve
+chown urbanserve:urbanserve /opt/urbanserve
+
+# ---------------------------------------------------------------------------
+# Runtime config (DB credentials, JWT key, origin secret, OTP settings) comes from an SSM
+# SecureString parameter. Fetched on every service start into an env file only the service
+# user can read, so config changes apply on restart.
+# ---------------------------------------------------------------------------
+cat > /opt/urbanserve/fetch-env.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+umask 077
+aws ssm get-parameter --region ${region} --name '${config_param}' --with-decryption \
+    --query Parameter.Value --output text \
+  | python3 -c 'import json,sys; print("\n".join(f"{k}={v}" for k, v in json.load(sys.stdin).items()))' \
+  > /opt/urbanserve/app.env.tmp
+mv /opt/urbanserve/app.env.tmp /opt/urbanserve/app.env
+SCRIPT
+chmod 755 /opt/urbanserve/fetch-env.sh
+
+%{ if db_mode == "ec2" ~}
+# ---------------------------------------------------------------------------
+# PostgreSQL 16 on a dedicated encrypted EBS volume (survives instance replacement).
+# Listens on localhost only; no security-group rule exists for 5432.
+# ---------------------------------------------------------------------------
+dnf install -y postgresql16-server postgresql16
+
+DEV=/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${pgdata_volume}
+for i in $(seq 1 60); do [ -e "$DEV" ] && break; echo "waiting for data volume..."; sleep 5; done
+[ -e "$DEV" ] || { echo "PostgreSQL data volume never attached"; exit 1; }
+
+# Format only if the volume is brand new (never wipe existing data).
+if ! blkid "$DEV" >/dev/null 2>&1; then
+  mkfs.xfs "$DEV"
+fi
+mkdir -p /var/lib/pgsql
+grep -q " /var/lib/pgsql " /etc/fstab || echo "$DEV /var/lib/pgsql xfs defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /var/lib/pgsql || mount /var/lib/pgsql
+chown postgres:postgres /var/lib/pgsql
+chmod 700 /var/lib/pgsql
+
+if [ ! -f /var/lib/pgsql/data/PG_VERSION ]; then
+  postgresql-setup --initdb
+fi
+
+cat > /var/lib/pgsql/data/pg_hba.conf <<'HBA'
+# TYPE  DATABASE  USER      ADDRESS        METHOD
+local   all       postgres                 peer
+local   all       all                      scram-sha-256
+host    all       all       127.0.0.1/32   scram-sha-256
+host    all       all       ::1/128        scram-sha-256
+HBA
+chown postgres:postgres /var/lib/pgsql/data/pg_hba.conf
+chmod 600 /var/lib/pgsql/data/pg_hba.conf
+sed -i "s/^#\?listen_addresses.*/listen_addresses = 'localhost'/" /var/lib/pgsql/data/postgresql.conf
+
+systemctl enable --now postgresql
+systemctl restart postgresql
+
+# Create (or re-sync the password of) the app role and database.
+DB_PASSWORD="$(aws ssm get-parameter --region ${region} --name '${config_param}' --with-decryption \
+  --query Parameter.Value --output text | python3 -c 'import json,sys; print(json.load(sys.stdin)["DB_PASSWORD"])')"
+cd /tmp
+sudo -u postgres psql -v ON_ERROR_STOP=1 -v pw="$DB_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE urbanserve_app LOGIN PASSWORD %L', :'pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'urbanserve_app')\gexec
+SELECT format('ALTER ROLE urbanserve_app PASSWORD %L', :'pw')\gexec
+SELECT 'CREATE DATABASE urbanserve OWNER urbanserve_app'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'urbanserve')\gexec
+SQL
+unset DB_PASSWORD
+
+# Nightly logical backup to S3 (kept 30 days by the bucket lifecycle rule).
+cat > /opt/urbanserve/backup-db.sh <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+cd /tmp
+sudo -u postgres pg_dump -Fc urbanserve \
+  | aws s3 cp - "s3://${artifact_bucket}/db-backups/urbanserve-$TS.dump" --region ${region}
+echo "backup uploaded: urbanserve-$TS.dump"
+SCRIPT
+chmod 700 /opt/urbanserve/backup-db.sh
+
+cat > /etc/systemd/system/urbanserve-backup.service <<'UNIT'
+[Unit]
+Description=UrbanServe PostgreSQL backup to S3
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/urbanserve/backup-db.sh
+UNIT
+
+cat > /etc/systemd/system/urbanserve-backup.timer <<'UNIT'
+[Unit]
+Description=Nightly UrbanServe DB backup (02:30 IST)
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+%{ endif ~}
+
+# ---------------------------------------------------------------------------
+# The API service. Pulls the latest jar from S3 on every (re)start, so a deploy is:
+# upload jar -> systemctl restart urbanserve. Keeps retrying until the jar exists.
+# ---------------------------------------------------------------------------
+cat > /etc/systemd/system/urbanserve.service <<'UNIT'
+[Unit]
+Description=UrbanServe API
+After=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+Wants=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+
+[Service]
+User=urbanserve
+WorkingDirectory=/opt/urbanserve
+Environment=AWS_REGION=${region}
+EnvironmentFile=-/opt/urbanserve/app.env
+ExecStartPre=/opt/urbanserve/fetch-env.sh
+ExecStartPre=/usr/bin/aws s3 cp s3://${artifact_bucket}/backend/urbanserve.jar /opt/urbanserve/app.jar --region ${region}
+ExecStart=/usr/bin/java -Xms256m -Xmx768m -jar /opt/urbanserve/app.jar --server.port=8080
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+%{ if db_mode == "ec2" ~}
+systemctl enable --now urbanserve-backup.timer
+%{ endif ~}
+systemctl enable --now urbanserve.service

@@ -1,0 +1,45 @@
+# Copy to terraform.tfvars and adjust.  Defaults = LEAN profile (~$20/month, fits the $200 AWS credits for 6 months).
+project     = "urbanserve"
+environment = "prod"
+region      = "ap-south-1" # Mumbai
+
+# --- Cost profile ---
+use_alb       = false        # true later: adds an Application Load Balancer (~$18/mo + 2 IPv4)
+enable_waf    = false        # true before public launch (~$15/mo + requests)
+db_mode       = "ec2"        # "rds" later for managed PostgreSQL (~$15–18/mo)
+instance_type = "t4g.small"  # ARM, 2 GB RAM
+
+# --- Budget alerts (strongly recommended) ---
+budget_alert_email = "you@example.com"
+monthly_budget_usd = 30
+
+# --- Auth / SMS ---
+admin_phones = []            # e.g. ["9876543210"]
+otp_sender   = "sns"         # "log" only for testing before DLT/SNS is ready (codes appear in the server log)
+# India requires DLT registration for SMS (TRAI). Fill these once approved:
+# sms_sender_id   = "URBSRV"
+# dlt_entity_id   = "1201..."
+# dlt_template_id = "1207..."
+sms_monthly_spend_limit_usd = 1
+
+# --- Custom domain (optional; the *.cloudfront.net URL works without it) ---
+# domain_aliases             = ["www.urbanserve.in"]
+# cloudfront_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."   # MUST be us-east-1
+
+# --- WAF tuning (used only when enable_waf = true) ---
+api_rate_limit_per_5min  = 300
+site_rate_limit_per_5min = 2000
+otp_rate_limit_per_5min  = 10
+blocked_countries        = []
+blocked_ip_cidrs         = []
+block_anonymous_ips      = false
+
+# --- RDS settings (used only when db_mode = "rds") ---
+db_instance_class      = "db.t4g.micro"
+db_multi_az            = false
+db_deletion_protection = true
+
+# --- Network (defaults to the default VPC) ---
+# vpc_id         = "vpc-..."
+# alb_subnet_ids = ["subnet-a", "subnet-b"]
+# ec2_subnet_id  = "subnet-a"
