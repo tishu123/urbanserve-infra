@@ -48,3 +48,19 @@ output "app_config_parameter" {
   description = "SSM SecureString holding DB credentials, JWT key and origin secret."
   value       = aws_ssm_parameter.app_config.name
 }
+
+output "dispatch_config_parameter" {
+  description = "SSM SecureString holding dispatch's DB credentials and queue URLs."
+  value       = aws_ssm_parameter.dispatch_config.name
+}
+
+output "sqs_queue_urls" {
+  description = "Booking <-> dispatch queues."
+  value       = { for k, q in aws_sqs_queue.main : k => q.url }
+}
+
+output "sqs_dead_letter_queues" {
+  description = "Messages that failed 5 times end up here (an alarm emails budget_alert_email)."
+  value       = { for k, q in aws_sqs_queue.dlq : k => q.name }
+}
+

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bootstraps the UrbanServe API on Amazon Linux 2023 (rendered by Terraform templatefile).
+# Bootstraps the UrbanServe API and dispatch services on Amazon Linux 2023 (rendered by Terraform templatefile).
 # Log: /var/log/urbanserve-bootstrap.log
 set -euo pipefail
 exec > >(tee -a /var/log/urbanserve-bootstrap.log) 2>&1
@@ -7,26 +7,38 @@ exec > >(tee -a /var/log/urbanserve-bootstrap.log) 2>&1
 dnf install -y java-21-amazon-corretto-headless
 dnf upgrade -y --security || true
 
+# One system user per service; each can read only its own env file.
 useradd --system --home /opt/urbanserve --shell /sbin/nologin urbanserve || true
 mkdir -p /opt/urbanserve
 chown urbanserve:urbanserve /opt/urbanserve
+useradd --system --home /opt/dispatch --shell /sbin/nologin dispatch || true
+mkdir -p /opt/dispatch
+chown dispatch:dispatch /opt/dispatch
 
 # ---------------------------------------------------------------------------
-# Runtime config (DB credentials, JWT key, origin secret, OTP settings) comes from an SSM
-# SecureString parameter. Fetched on every service start into an env file only the service
+# Runtime config (DB credentials, JWT key, origin secret, OTP settings, queue URLs) comes from SSM
+# SecureString parameters. Fetched on every service start into an env file only the service
 # user can read, so config changes apply on restart.
+#   usage: urbanserve-fetch-env <ssm-parameter-name> <env-file>
 # ---------------------------------------------------------------------------
-cat > /opt/urbanserve/fetch-env.sh <<'SCRIPT'
+cat > /usr/local/bin/urbanserve-fetch-env <<'SCRIPT'
 #!/bin/bash
 set -euo pipefail
 umask 077
-aws ssm get-parameter --region ${region} --name '${config_param}' --with-decryption \
+PARAM="$1"; OUT="$2"
+aws ssm get-parameter --region ${region} --name "$PARAM" --with-decryption \
     --query Parameter.Value --output text \
   | python3 -c 'import json,sys; q=lambda v: chr(34) + str(v).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34)) + chr(34); print("\n".join(k + "=" + q(v) for k, v in json.load(sys.stdin).items()))' \
-  > /opt/urbanserve/app.env.tmp
-mv /opt/urbanserve/app.env.tmp /opt/urbanserve/app.env
+  > "$OUT.tmp"
+mv "$OUT.tmp" "$OUT"
 SCRIPT
-chmod 755 /opt/urbanserve/fetch-env.sh
+chmod 755 /usr/local/bin/urbanserve-fetch-env
+
+# Reads one key from an SSM JSON parameter (bootstrap only).
+ssm_json() {
+  aws ssm get-parameter --region ${region} --name "$1" --with-decryption --query Parameter.Value --output text \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$2"
+}
 
 %{ if db_mode == "ec2" ~}
 # ---------------------------------------------------------------------------
@@ -68,8 +80,7 @@ systemctl enable --now postgresql
 systemctl restart postgresql
 
 # Create (or re-sync the password of) the app role and database.
-DB_PASSWORD="$(aws ssm get-parameter --region ${region} --name '${config_param}' --with-decryption \
-  --query Parameter.Value --output text | python3 -c 'import json,sys; print(json.load(sys.stdin)["DB_PASSWORD"])')"
+DB_PASSWORD="$(ssm_json '${config_param}' DB_PASSWORD)"
 cd /tmp
 sudo -u postgres psql -v ON_ERROR_STOP=1 -v pw="$DB_PASSWORD" <<'SQL'
 SELECT format('CREATE ROLE urbanserve_app LOGIN PASSWORD %L', :'pw')
@@ -80,15 +91,28 @@ SELECT 'CREATE DATABASE urbanserve OWNER urbanserve_app'
 SQL
 unset DB_PASSWORD
 
+# Same for urbanserve-dispatch's own database.
+DISPATCH_DB_PASSWORD="$(ssm_json '${dispatch_config_param}' DB_PASSWORD)"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -v pw="$DISPATCH_DB_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE dispatch_app LOGIN PASSWORD %L', :'pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dispatch_app')\gexec
+SELECT format('ALTER ROLE dispatch_app PASSWORD %L', :'pw')\gexec
+SELECT 'CREATE DATABASE dispatch OWNER dispatch_app'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'dispatch')\gexec
+SQL
+unset DISPATCH_DB_PASSWORD
+
 # Nightly logical backup to S3 (kept 30 days by the bucket lifecycle rule).
 cat > /opt/urbanserve/backup-db.sh <<'SCRIPT'
 #!/bin/bash
 set -euo pipefail
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 cd /tmp
-sudo -u postgres pg_dump -Fc urbanserve \
-  | aws s3 cp - "s3://${artifact_bucket}/db-backups/urbanserve-$TS.dump" --region ${region}
-echo "backup uploaded: urbanserve-$TS.dump"
+for DB in urbanserve dispatch; do
+  sudo -u postgres pg_dump -Fc "$DB" \
+    | aws s3 cp - "s3://${artifact_bucket}/db-backups/$DB-$TS.dump" --region ${region}
+  echo "backup uploaded: $DB-$TS.dump"
+done
 SCRIPT
 chmod 700 /opt/urbanserve/backup-db.sh
 
@@ -115,6 +139,30 @@ WantedBy=timers.target
 UNIT
 %{ endif ~}
 
+%{ if db_mode == "rds" ~}
+# ---------------------------------------------------------------------------
+# RDS: create urbanserve-dispatch's role and database on the same instance, using the master
+# user (urbanserve_app). Idempotent; re-syncs the password on every boot.
+# ---------------------------------------------------------------------------
+dnf install -y postgresql16
+export PGPASSWORD="$(ssm_json '${config_param}' DB_PASSWORD)"
+DISPATCH_DB_PASSWORD="$(ssm_json '${dispatch_config_param}' DB_PASSWORD)"
+for i in $(seq 1 30); do
+  psql "host=${rds_host} port=5432 dbname=urbanserve user=urbanserve_app sslmode=require" -c 'select 1' >/dev/null 2>&1 && break
+  echo "waiting for RDS..."; sleep 10
+done
+psql "host=${rds_host} port=5432 dbname=urbanserve user=urbanserve_app sslmode=require" \
+  -v ON_ERROR_STOP=1 -v pw="$DISPATCH_DB_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE dispatch_app LOGIN PASSWORD %L', :'pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dispatch_app')\gexec
+SELECT format('ALTER ROLE dispatch_app PASSWORD %L', :'pw')\gexec
+GRANT dispatch_app TO urbanserve_app;
+SELECT 'CREATE DATABASE dispatch OWNER dispatch_app'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'dispatch')\gexec
+SQL
+unset PGPASSWORD DISPATCH_DB_PASSWORD
+%{ endif ~}
+
 # ---------------------------------------------------------------------------
 # The API service. Pulls the latest jar from S3 on every (re)start, so a deploy is:
 # upload jar -> systemctl restart urbanserve. Keeps retrying until the jar exists.
@@ -130,9 +178,38 @@ User=urbanserve
 WorkingDirectory=/opt/urbanserve
 Environment=AWS_REGION=${region}
 EnvironmentFile=-/opt/urbanserve/app.env
-ExecStartPre=/opt/urbanserve/fetch-env.sh
+ExecStartPre=/usr/local/bin/urbanserve-fetch-env '${config_param}' /opt/urbanserve/app.env
 ExecStartPre=/usr/bin/aws s3 cp s3://${artifact_bucket}/backend/urbanserve.jar /opt/urbanserve/app.jar --region ${region}
 ExecStart=/usr/bin/java -Xms256m -Xmx768m -jar /opt/urbanserve/app.jar --server.port=8080
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# ---------------------------------------------------------------------------
+# urbanserve-dispatch: assigns professionals (SQS in/out). Listens on 127.0.0.1:8090 only.
+# Deploy = upload backend/dispatch.jar -> systemctl restart urbanserve-dispatch
+# ---------------------------------------------------------------------------
+cat > /etc/systemd/system/urbanserve-dispatch.service <<'UNIT'
+[Unit]
+Description=UrbanServe dispatch (assigns professionals)
+After=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+Wants=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+
+[Service]
+User=dispatch
+WorkingDirectory=/opt/dispatch
+Environment=AWS_REGION=${region}
+EnvironmentFile=-/opt/dispatch/dispatch.env
+ExecStartPre=/usr/local/bin/urbanserve-fetch-env '${dispatch_config_param}' /opt/dispatch/dispatch.env
+ExecStartPre=/usr/bin/aws s3 cp s3://${artifact_bucket}/backend/dispatch.jar /opt/dispatch/app.jar --region ${region}
+ExecStart=/usr/bin/java -Xms128m -Xmx384m -jar /opt/dispatch/app.jar
 Restart=always
 RestartSec=15
 NoNewPrivileges=true
@@ -149,3 +226,4 @@ systemctl daemon-reload
 systemctl enable --now urbanserve-backup.timer
 %{ endif ~}
 systemctl enable --now urbanserve.service
+systemctl enable --now urbanserve-dispatch.service

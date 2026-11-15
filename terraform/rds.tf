@@ -133,6 +133,11 @@ resource "aws_ssm_parameter" "app_config" {
     APP_OTP_MC_CUSTOMER_ID  = var.messagecentral_customer_id
     APP_OTP_MC_PASSWORD     = var.messagecentral_password == null ? "" : var.messagecentral_password
     APP_OTP_MC_FLOW_TYPE    = var.messagecentral_flow_type
+    # Dispatch messaging (see sqs.tf)
+    APP_DISPATCH_TRANSPORT         = "sqs"
+    APP_SQS_BOOKING_REQUESTED_URL  = aws_sqs_queue.main["booking-requested"].url
+    APP_SQS_BOOKING_CANCELLED_URL  = aws_sqs_queue.main["booking-cancelled"].url
+    APP_SQS_BOOKING_ASSIGNMENT_URL = aws_sqs_queue.main["booking-assignment"].url
   })
 
   lifecycle {

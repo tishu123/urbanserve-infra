@@ -7,7 +7,7 @@ region      = "ap-south-1" # Mumbai
 use_alb       = false        # true later: adds an Application Load Balancer (~$18/mo + 2 IPv4)
 enable_waf    = false        # true before public launch (~$15/mo + requests)
 db_mode       = "ec2"        # "rds" later for managed PostgreSQL (~$15–18/mo)
-instance_type = "t4g.small"  # ARM, 2 GB RAM
+instance_type = "t4g.medium" # ARM, 4 GB RAM: API + dispatch + PostgreSQL
 
 # --- Budget alerts (strongly recommended) ---
 budget_alert_email = "you@example.com"

@@ -61,9 +61,9 @@ variable "ec2_associate_public_ip" {
 }
 
 variable "instance_type" {
-  description = "t4g.small (ARM, 2 GB) runs Spring Boot + PostgreSQL comfortably and is cheaper than t3.small."
+  description = "t4g.medium (ARM, 4 GB) runs the API, dispatch and PostgreSQL together. t4g.small (2 GB) is too tight for two Java services."
   type        = string
-  default     = "t4g.small"
+  default     = "t4g.medium"
 }
 
 # ---------- Cost profile ----------

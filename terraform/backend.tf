@@ -227,7 +227,19 @@ data "aws_iam_policy_document" "app_runtime" {
   statement {
     sid       = "ReadAppConfig"
     actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.app_config.arn]
+    resources = [aws_ssm_parameter.app_config.arn, aws_ssm_parameter.dispatch_config.arn]
+  }
+  # urbanserve-api and urbanserve-dispatch both run on this instance (see sqs.tf for who uses which queue).
+  statement {
+    sid = "BookingDispatchQueues"
+    actions = [
+      "sqs:SendMessage",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:ChangeMessageVisibility",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [for q in aws_sqs_queue.main : q.arn]
   }
   # Only when SMS goes through Amazon SNS (Message Central is called over HTTPS with its own credentials).
   dynamic "statement" {
@@ -289,11 +301,13 @@ resource "aws_instance" "app" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    artifact_bucket = aws_s3_bucket.artifacts.bucket
-    region          = var.region
-    config_param    = aws_ssm_parameter.app_config.name
-    db_mode         = var.db_mode
-    pgdata_volume   = replace(coalesce(one(aws_ebs_volume.pgdata[*].id), ""), "-", "")
+    artifact_bucket       = aws_s3_bucket.artifacts.bucket
+    region                = var.region
+    config_param          = aws_ssm_parameter.app_config.name
+    dispatch_config_param = aws_ssm_parameter.dispatch_config.name
+    db_mode               = var.db_mode
+    pgdata_volume         = replace(join("", aws_ebs_volume.pgdata[*].id), "-", "") # "" when db_mode = "rds"
+    rds_host              = join("", aws_db_instance.main[*].address)          # "" when db_mode = "ec2"
   })
   user_data_replace_on_change = true
 

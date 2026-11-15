@@ -1,0 +1,68 @@
+# Local stack for UrbanServe dispatch: the same message flow as AWS, on your Mac.
+#   elasticmq  – SQS-compatible queues (stands in for Amazon SQS): booking-requested,
+#                booking-cancelled, booking-assignment (+ dead-letter queues, like Terraform creates)
+#   postgres   – dispatch's database (professionals, shifts, assignments)
+#   dispatch   – urbanserve-dispatch, built from ../../urbanserve-dispatch
+#
+# Start:   docker compose up -d --build        (from this folder)
+# Logs:    docker compose logs -f dispatch
+# Stop:    docker compose down                 (add -v to also wipe dispatch's database)
+#
+# The booking API (urbanserve-api) runs on your Mac as usual (java -jar); put the dispatch lines from
+# its .env.example into its .env so it talks to ElasticMQ on localhost:9324.
+
+name: urbanserve
+
+services:
+  elasticmq:
+    image: softwaremill/elasticmq-native:latest
+    ports:
+      - "9324:9324"   # SQS API
+      - "9325:9325"   # queue stats UI: http://localhost:9325
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dispatch
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: dispatch   # local only
+    ports:
+      - "5433:5432"   # psql -h localhost -p 5433 -U dispatch dispatch
+    volumes:
+      - dispatch-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dispatch -d dispatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  dispatch:
+    build: ${DISPATCH_DIR:-../../urbanserve-dispatch}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticmq:
+        condition: service_started
+    environment:
+      DISPATCH_TRANSPORT: sqs
+      APP_SQS_ENDPOINT: http://elasticmq:9324
+      APP_SQS_BOOKING_REQUESTED_URL: http://elasticmq:9324/000000000000/booking-requested
+      APP_SQS_BOOKING_CANCELLED_URL: http://elasticmq:9324/000000000000/booking-cancelled
+      APP_SQS_BOOKING_ASSIGNMENT_URL: http://elasticmq:9324/000000000000/booking-assignment
+      DB_URL: jdbc:postgresql://postgres:5432/dispatch
+      DB_USERNAME: dispatch
+      DB_PASSWORD: dispatch
+      # The AWS SDK needs a region and some credentials; ElasticMQ accepts anything.
+      AWS_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    ports:
+      - "8090:8090"   # internal endpoints: /internal/providers, /actuator/health
+    restart: unless-stopped
+
+volumes:
+  dispatch-db:
