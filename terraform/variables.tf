@@ -201,12 +201,35 @@ variable "db_subnet_ids" {
 
 # ---------- Auth / OTP ----------
 variable "otp_sender" {
-  description = "\"sns\" sends real SMS. \"log\" writes codes to the server log (testing only, before DLT/SNS is ready)."
+  description = "\"messagecentral\" = Message Central VerifyNow (real SMS, no DLT registration of your own). \"sns\" = Amazon SNS (needs your own DLT registration). \"log\" = codes in the server log (testing only)."
   type        = string
-  default     = "sns"
+  default     = "messagecentral"
   validation {
-    condition     = contains(["sns", "log"], var.otp_sender)
-    error_message = "otp_sender must be \"sns\" or \"log\"."
+    condition     = contains(["messagecentral", "sns", "log"], var.otp_sender)
+    error_message = "otp_sender must be \"messagecentral\", \"sns\" or \"log\"."
+  }
+}
+
+variable "messagecentral_customer_id" {
+  description = "Message Central customer ID (console home page). Used when otp_sender = \"messagecentral\"."
+  type        = string
+  default     = "C-DC8D1C144CA446C"
+}
+
+variable "messagecentral_password" {
+  description = "Message Central account password. Required when otp_sender = \"messagecentral\". Set it in terraform.tfvars (git-ignored) or TF_VAR_messagecentral_password; it is stored only in the encrypted SSM parameter (and Terraform state)."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "messagecentral_flow_type" {
+  description = "How Message Central delivers the OTP: \"SMS\" or \"WHATSAPP\"."
+  type        = string
+  default     = "SMS"
+  validation {
+    condition     = contains(["SMS", "WHATSAPP"], var.messagecentral_flow_type)
+    error_message = "messagecentral_flow_type must be \"SMS\" or \"WHATSAPP\"."
   }
 }
 

@@ -115,7 +115,7 @@ resource "random_password" "jwt" {
 
 resource "aws_ssm_parameter" "app_config" {
   name        = "/${var.project}/${var.environment}/app-config"
-  description = "UrbanServe runtime config: DB credentials, JWT key, origin secret, OTP settings"
+  description = "UrbanServe runtime config: DB credentials, JWT key, origin secret, OTP settings (incl. Message Central)"
   type        = "SecureString" # encrypted with the AWS-managed aws/ssm key
   tier        = "Standard"
   value = jsonencode({
@@ -130,7 +130,17 @@ resource "aws_ssm_parameter" "app_config" {
     APP_OTP_SNS_SENDER_ID   = var.sms_sender_id
     APP_OTP_SNS_ENTITY_ID   = var.dlt_entity_id
     APP_OTP_SNS_TEMPLATE_ID = var.dlt_template_id
+    APP_OTP_MC_CUSTOMER_ID  = var.messagecentral_customer_id
+    APP_OTP_MC_PASSWORD     = var.messagecentral_password == null ? "" : var.messagecentral_password
+    APP_OTP_MC_FLOW_TYPE    = var.messagecentral_flow_type
   })
+
+  lifecycle {
+    precondition {
+      condition     = var.otp_sender != "messagecentral" || (trimspace(var.messagecentral_customer_id) != "" && var.messagecentral_password != null && var.messagecentral_password != "")
+      error_message = "otp_sender = \"messagecentral\" needs messagecentral_customer_id and messagecentral_password (set them in terraform.tfvars or TF_VAR_messagecentral_password)."
+    }
+  }
 }
 
 # ---------- SMS (Amazon SNS) account settings ----------

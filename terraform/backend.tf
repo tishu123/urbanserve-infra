@@ -70,7 +70,7 @@ resource "aws_vpc_security_group_ingress_rule" "app_from_alb" {
 
 resource "aws_vpc_security_group_egress_rule" "app_https_out" {
   security_group_id = aws_security_group.app.id
-  description       = "HTTPS out for S3, SSM, SNS and OS updates"
+  description       = "HTTPS out for S3, SSM, SNS, Message Central (cpaas.messagecentral.com) and OS updates"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = 443
@@ -229,10 +229,14 @@ data "aws_iam_policy_document" "app_runtime" {
     actions   = ["ssm:GetParameter"]
     resources = [aws_ssm_parameter.app_config.arn]
   }
-  statement {
-    sid       = "SendOtpSms"
-    actions   = ["sns:Publish"]
-    resources = ["*"] # direct-to-phone SMS has no resource ARN, so this cannot be scoped further
+  # Only when SMS goes through Amazon SNS (Message Central is called over HTTPS with its own credentials).
+  dynamic "statement" {
+    for_each = var.otp_sender == "sns" ? [1] : []
+    content {
+      sid       = "SendOtpSms"
+      actions   = ["sns:Publish"]
+      resources = ["*"] # direct-to-phone SMS has no resource ARN, so this cannot be scoped further
+    }
   }
 }
 

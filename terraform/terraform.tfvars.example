@@ -15,8 +15,13 @@ monthly_budget_usd = 30
 
 # --- Auth / SMS ---
 admin_phones = []            # e.g. ["9876543210"]
-otp_sender   = "sns"         # "log" only for testing before DLT/SNS is ready (codes appear in the server log)
-# India requires DLT registration for SMS (TRAI). Fill these once approved:
+otp_sender   = "messagecentral" # Message Central VerifyNow: real SMS, no DLT registration of your own
+                                # "sns" = Amazon SNS (needs DLT IDs below); "log" = testing only
+# Message Central (otp_sender = "messagecentral"). Customer ID is already the default.
+messagecentral_password  = "your-message-central-password"   # this file is git-ignored
+# messagecentral_flow_type = "WHATSAPP"                      # default "SMS"
+
+# Amazon SNS only (otp_sender = "sns"). India requires DLT registration for SMS (TRAI). Fill these once approved:
 # sms_sender_id   = "URBSRV"
 # dlt_entity_id   = "1201..."
 # dlt_template_id = "1207..."

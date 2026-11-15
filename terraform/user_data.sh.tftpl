@@ -22,7 +22,7 @@ set -euo pipefail
 umask 077
 aws ssm get-parameter --region ${region} --name '${config_param}' --with-decryption \
     --query Parameter.Value --output text \
-  | python3 -c 'import json,sys; print("\n".join(f"{k}={v}" for k, v in json.load(sys.stdin).items()))' \
+  | python3 -c 'import json,sys; q=lambda v: chr(34) + str(v).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34)) + chr(34); print("\n".join(k + "=" + q(v) for k, v in json.load(sys.stdin).items()))' \
   > /opt/urbanserve/app.env.tmp
 mv /opt/urbanserve/app.env.tmp /opt/urbanserve/app.env
 SCRIPT
