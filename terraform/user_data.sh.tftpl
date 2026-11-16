@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bootstraps the UrbanServe API and dispatch services on Amazon Linux 2023 (rendered by Terraform templatefile).
+# Bootstraps the UrbanServe API, dispatch and payment services on Amazon Linux 2023 (rendered by Terraform templatefile).
 # Log: /var/log/urbanserve-bootstrap.log
 set -euo pipefail
 exec > >(tee -a /var/log/urbanserve-bootstrap.log) 2>&1
@@ -14,6 +14,9 @@ chown urbanserve:urbanserve /opt/urbanserve
 useradd --system --home /opt/dispatch --shell /sbin/nologin dispatch || true
 mkdir -p /opt/dispatch
 chown dispatch:dispatch /opt/dispatch
+useradd --system --home /opt/payment --shell /sbin/nologin payment || true
+mkdir -p /opt/payment
+chown payment:payment /opt/payment
 
 # ---------------------------------------------------------------------------
 # Runtime config (DB credentials, JWT key, origin secret, OTP settings, queue URLs) comes from SSM
@@ -102,13 +105,24 @@ SELECT 'CREATE DATABASE dispatch OWNER dispatch_app'
 SQL
 unset DISPATCH_DB_PASSWORD
 
+# Same for urbanserve-payment's own database.
+PAYMENT_DB_PASSWORD="$(ssm_json '${payment_config_param}' SPRING_DATASOURCE_PASSWORD)"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -v pw="$PAYMENT_DB_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE payment_app LOGIN PASSWORD %L', :'pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'payment_app')\gexec
+SELECT format('ALTER ROLE payment_app PASSWORD %L', :'pw')\gexec
+SELECT 'CREATE DATABASE payment OWNER payment_app'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'payment')\gexec
+SQL
+unset PAYMENT_DB_PASSWORD
+
 # Nightly logical backup to S3 (kept 30 days by the bucket lifecycle rule).
 cat > /opt/urbanserve/backup-db.sh <<'SCRIPT'
 #!/bin/bash
 set -euo pipefail
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 cd /tmp
-for DB in urbanserve dispatch; do
+for DB in urbanserve dispatch payment; do
   sudo -u postgres pg_dump -Fc "$DB" \
     | aws s3 cp - "s3://${artifact_bucket}/db-backups/$DB-$TS.dump" --region ${region}
   echo "backup uploaded: $DB-$TS.dump"
@@ -160,7 +174,17 @@ GRANT dispatch_app TO urbanserve_app;
 SELECT 'CREATE DATABASE dispatch OWNER dispatch_app'
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'dispatch')\gexec
 SQL
-unset PGPASSWORD DISPATCH_DB_PASSWORD
+PAYMENT_DB_PASSWORD="$(ssm_json '${payment_config_param}' SPRING_DATASOURCE_PASSWORD)"
+psql "host=${rds_host} port=5432 dbname=urbanserve user=urbanserve_app sslmode=require" \
+  -v ON_ERROR_STOP=1 -v pw="$PAYMENT_DB_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE payment_app LOGIN PASSWORD %L', :'pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'payment_app')\gexec
+SELECT format('ALTER ROLE payment_app PASSWORD %L', :'pw')\gexec
+GRANT payment_app TO urbanserve_app;
+SELECT 'CREATE DATABASE payment OWNER payment_app'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'payment')\gexec
+SQL
+unset PGPASSWORD DISPATCH_DB_PASSWORD PAYMENT_DB_PASSWORD
 %{ endif ~}
 
 # ---------------------------------------------------------------------------
@@ -221,9 +245,40 @@ ProtectHome=true
 WantedBy=multi-user.target
 UNIT
 
+# ---------------------------------------------------------------------------
+# urbanserve-payment: Razorpay payments. Listens on 127.0.0.1:8091 only.
+# Config (DB, Razorpay keys, internal token) is pulled from SSM on every start.
+# Deploy = upload backend/payment.jar -> systemctl restart urbanserve-payment
+# ---------------------------------------------------------------------------
+cat > /etc/systemd/system/urbanserve-payment.service <<'UNIT'
+[Unit]
+Description=UrbanServe payment (Razorpay)
+After=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+Wants=network-online.target%{ if db_mode == "ec2" } postgresql.service%{ endif }
+
+[Service]
+User=payment
+WorkingDirectory=/opt/payment
+Environment=AWS_REGION=${region}
+EnvironmentFile=-/opt/payment/payment.env
+ExecStartPre=/usr/local/bin/urbanserve-fetch-env '${payment_config_param}' /opt/payment/payment.env
+ExecStartPre=/usr/bin/aws s3 cp s3://${artifact_bucket}/backend/payment.jar /opt/payment/app.jar --region ${region}
+ExecStart=/usr/bin/java -Xms128m -Xmx384m -jar /opt/payment/app.jar
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 systemctl daemon-reload
 %{ if db_mode == "ec2" ~}
 systemctl enable --now urbanserve-backup.timer
 %{ endif ~}
 systemctl enable --now urbanserve.service
 systemctl enable --now urbanserve-dispatch.service
+systemctl enable --now urbanserve-payment.service

@@ -227,7 +227,7 @@ data "aws_iam_policy_document" "app_runtime" {
   statement {
     sid       = "ReadAppConfig"
     actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.app_config.arn, aws_ssm_parameter.dispatch_config.arn]
+    resources = [aws_ssm_parameter.app_config.arn, aws_ssm_parameter.dispatch_config.arn, aws_ssm_parameter.payment_config.arn]
   }
   # urbanserve-api and urbanserve-dispatch both run on this instance (see sqs.tf for who uses which queue).
   statement {
@@ -305,6 +305,7 @@ resource "aws_instance" "app" {
     region                = var.region
     config_param          = aws_ssm_parameter.app_config.name
     dispatch_config_param = aws_ssm_parameter.dispatch_config.name
+    payment_config_param  = aws_ssm_parameter.payment_config.name
     db_mode               = var.db_mode
     pgdata_volume         = replace(join("", aws_ebs_volume.pgdata[*].id), "-", "") # "" when db_mode = "rds"
     rds_host              = join("", aws_db_instance.main[*].address)          # "" when db_mode = "ec2"

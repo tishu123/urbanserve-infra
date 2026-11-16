@@ -27,6 +27,12 @@ messagecentral_password  = "your-message-central-password"   # this file is git-
 # dlt_template_id = "1207..."
 sms_monthly_spend_limit_usd = 1
 
+# --- Payments (Razorpay) --- this file is git-ignored; never put real keys in the .example
+# Dashboard -> Account & Settings -> API Keys. Use test keys until your account is activated.
+razorpay_key_id         = "rzp_test_xxxxxxxxxxxxxx"
+razorpay_key_secret     = "your-razorpay-key-secret"     # or: export TF_VAR_razorpay_key_secret='...'
+razorpay_webhook_secret = "your-razorpay-webhook-secret" # the secret you type when creating the webhook
+
 # --- Custom domain (optional; the *.cloudfront.net URL works without it) ---
 # domain_aliases             = ["www.urbanserve.in"]
 # cloudfront_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."   # MUST be us-east-1

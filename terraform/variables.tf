@@ -268,3 +268,28 @@ variable "otp_rate_limit_per_5min" {
   type        = number
   default     = 10
 }
+
+# ---------- Payments (Razorpay) ----------
+variable "razorpay_key_id" {
+  description = "Razorpay API key ID (rzp_test_... while testing, rzp_live_... after activation). Empty = payments not configured."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.razorpay_key_id == "" || can(regex("^rzp_(test|live)_[A-Za-z0-9]+$", var.razorpay_key_id))
+    error_message = "razorpay_key_id must look like rzp_test_... or rzp_live_..."
+  }
+}
+
+variable "razorpay_key_secret" {
+  description = "Razorpay API key secret, matching razorpay_key_id. Set it in terraform.tfvars (git-ignored) or TF_VAR_razorpay_key_secret; it is stored only in the encrypted SSM parameter (and Terraform state)."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "razorpay_webhook_secret" {
+  description = "Secret you set on the Razorpay webhook (Dashboard -> Webhooks). Used to verify webhook signatures."
+  type        = string
+  default     = null
+  sensitive   = true
+}
