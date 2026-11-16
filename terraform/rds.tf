@@ -138,6 +138,9 @@ resource "aws_ssm_parameter" "app_config" {
     APP_SQS_BOOKING_REQUESTED_URL  = aws_sqs_queue.main["booking-requested"].url
     APP_SQS_BOOKING_CANCELLED_URL  = aws_sqs_queue.main["booking-cancelled"].url
     APP_SQS_BOOKING_ASSIGNMENT_URL = aws_sqs_queue.main["booking-assignment"].url
+    # Payment service (see payment.tf)
+    PAYMENT_SERVICE_URL    = "http://127.0.0.1:${local.payment_port}"
+    PAYMENT_INTERNAL_TOKEN = random_password.payment_internal_token.result
   })
 
   lifecycle {

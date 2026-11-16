@@ -77,6 +77,7 @@ terraform apply                                # ~10 min (CloudFront is the slow
 cd ..
 ./scripts/deploy-backend.sh  ~/urban/urbanserve-api
 ./scripts/deploy-dispatch.sh ~/urban/urbanserve-dispatch
+./scripts/deploy-payment.sh  ~/urban/urbanserve-payment
 ./scripts/deploy-frontend.sh ~/urban/urbanserve-web
 ```
 
@@ -99,6 +100,22 @@ Open the `site_url` output.
   ```
 - **Change config** (e.g. admin phones): edit `terraform.tfvars`, run `terraform apply`, then restart the service through SSM.
 - **Move to RDS later:** take a backup, set `db_mode = "rds"`, apply, `pg_restore` into RDS, restart.
+
+## Payments (Razorpay)
+
+`urbanserve-payment` runs on the app server as `urbanserve-payment` (127.0.0.1:8091, own `payment`
+database). On every start it pulls its settings from the SSM parameter `payment-config`
+(`terraform output payment_config_parameter`), so **nothing is copied onto the server by hand**.
+
+1. In `terraform.tfvars` (git-ignored) set `razorpay_key_id`, `razorpay_key_secret` and
+   `razorpay_webhook_secret`. Prefer not to keep secrets in a file?
+   `export TF_VAR_razorpay_key_secret='...'` before `terraform apply`.
+2. `terraform apply`, then `./scripts/deploy-payment.sh ~/urban/urbanserve-payment`.
+3. Going live: swap the `rzp_test_` key pair for the `rzp_live_` pair in `terraform.tfvars`,
+   `terraform apply`, then `sudo systemctl restart urbanserve-payment` (via SSM).
+
+The API gets `PAYMENT_SERVICE_URL` and the shared `PAYMENT_INTERNAL_TOKEN` in its own config.
+Logs: `sudo journalctl -u urbanserve-payment -f`.
 
 ## SMS for OTP (India)
 

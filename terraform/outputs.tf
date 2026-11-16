@@ -54,6 +54,11 @@ output "dispatch_config_parameter" {
   value       = aws_ssm_parameter.dispatch_config.name
 }
 
+output "payment_config_parameter" {
+  description = "SSM SecureString holding the payment service's DB credentials and Razorpay keys."
+  value       = aws_ssm_parameter.payment_config.name
+}
+
 output "sqs_queue_urls" {
   description = "Booking <-> dispatch queues."
   value       = { for k, q in aws_sqs_queue.main : k => q.url }
